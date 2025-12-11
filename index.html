@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>猫猫 1v1 格斗（参考小区两只猫）</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #222;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      user-select: none;
+    }
+    canvas {
+      border-radius: 8px;
+      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+      background: #888;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+
+<script>
+// ====== 基本设置 ======
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+
+// 配置集中管理，便于调节和后续扩展
+const CONFIG = {
+  groundY: HEIGHT - 80,
+  gravity: 0.8,
+  friction: 0.82, // 基础阻尼，实际每帧会按 dt 校正
+  moveSpeed: 5,
+  jumpPower: 18,
+  attack: {
+    damage: 5,
+    duration: 10,
+    cooldown: 25,
+    range: 40,
+    width: 40,
+    knockback: 7,
+    hitstun: 12,
+    flash: 12,
+    slashColor: "rgba(255, 255, 255, 0.8)",
+    slashGlow: "rgba(255, 210, 170, 0.6)"
+  },
+  skill: {
+    damage: 14,
+    width: 100,
+    duration: 16,
+    cooldown: 180, // 帧（约3秒，取决于 dt）
+    knockback: 14,
+    flash: 18
+  }
+};
+
+// 关卡配置：逐渐提升 AI（P2）属性
+const LEVELS = [
+  { name: "Lv1 新手", stats: { maxHp: 70, moveSpeed: 1, attackDamage: 3, attackCooldown: 30, attackKnockback: 1 } },
+  { name: "Lv2 入门", stats: { maxHp: 75, moveSpeed: 2, attackDamage: 3, attackCooldown: 29, attackKnockback: 1 } },
+  { name: "Lv3 适应", stats: { maxHp: 80, moveSpeed: 3, attackDamage: 4, attackCooldown: 28, attackKnockback: 3 } },
+  { name: "Lv4 提升", stats: { maxHp: 85, moveSpeed: 3, attackDamage: 4, attackCooldown: 27, attackKnockback: 3 } },
+  { name: "Lv5 稍难", stats: { maxHp: 90, moveSpeed: 4.2, attackDamage: 4, attackCooldown: 26, attackKnockback: 6 } },
+  { name: "Lv6 增压", stats: { maxHp: 95, moveSpeed: 4.4, attackDamage: 5, attackCooldown: 25, attackKnockback: 7 } },
+  { name: "Lv7 紧张", stats: { maxHp: 100, moveSpeed: 4.6, attackDamage: 5, attackCooldown: 24, attackKnockback: 7 } },
+  { name: "Lv8 强劲", stats: { maxHp: 105, moveSpeed: 4.8, attackDamage: 5, attackCooldown: 23, attackKnockback: 7 } },
+  { name: "Lv9 压力", stats: { maxHp: 110, moveSpeed: 5.0, attackDamage: 6, attackCooldown: 22, attackKnockback: 8 } },
+  { name: "Lv10 终极", stats: { maxHp: 120, moveSpeed: 5.0, attackDamage: 6, attackCooldown: 21, attackKnockback: 8 } }
+];
+
+// AI 攻击模式
+const AI_ATTACKS = {
+  quick: { damage: 5, width: 40, knockback: 3, duration: 8, cooldown: 18 },
+  heavy: { damage: 8, width: 55, knockback: 5, duration: 12, cooldown: 26 },
+  lunge: { damage: 7, width: 50, knockback: 6, duration: 10, cooldown: 22, dashSpeed: 11 }
+};
+
+// ====== 角色类 ======
+class Fighter {
+  constructor(options) {
+    this.x = options.x;
+    this.y = options.y;
+    this.width = 60;
+    this.height = 80;
+    this.colorBody = options.colorBody;   // 身体主色
+    this.colorAccent = options.colorAccent; // 花纹
+    this.facing = options.facing || 1;    // 1 向右，-1 向左
+    this.velX = 0;
+    this.velY = 0;
+
+    // 属性配置（可针对不同猫调整）
+    const defaultStats = {
+      maxHp: 100,
+      moveSpeed: CONFIG.moveSpeed,
+      jumpPower: CONFIG.jumpPower,
+      attackDamage: CONFIG.attack.damage,
+      attackDuration: CONFIG.attack.duration,
+      attackCooldown: CONFIG.attack.cooldown,
+      attackWidth: CONFIG.attack.width,
+      attackKnockback: CONFIG.attack.knockback,
+      attackHitstun: CONFIG.attack.hitstun,
+      attackFlash: CONFIG.attack.flash,
+      skillDamage: CONFIG.skill.damage,
+      skillWidth: CONFIG.skill.width,
+      skillDuration: CONFIG.skill.duration,
+      skillCooldown: CONFIG.skill.cooldown,
+      skillKnockback: CONFIG.skill.knockback,
+      skillFlash: CONFIG.skill.flash
+    };
+    this.stats = { ...defaultStats, ...(options.stats || {}) };
+
+    this.speed = this.stats.moveSpeed;
+    this.jumpPower = this.stats.jumpPower;
+    this.onGround = false;
+    this.state = "idle"; // idle | run | jump | attack | hit
+    this.hitstunTimer = 0;
+    this.flashTimer = 0;
+
+    this.maxHp = this.stats.maxHp;
+    this.hp = this.maxHp;
+
+    this.isAttacking = false;
+    this.attackDuration = this.stats.attackDuration; // 帧（默认）
+    this.attackTimer = 0;
+    this.attackCooldown = this.stats.attackCooldown;
+    this.cooldownTimer = 0;
+
+    // 技能状态
+    this.isUsingSkill = false;
+    this.skillTimer = 0;
+    this.skillCooldownTimer = 0;
+    this.skillDamageCurrent = this.stats.skillDamage;
+    this.skillWidthCurrent = this.stats.skillWidth;
+    this.skillKnockbackCurrent = this.stats.skillKnockback;
+    this.skillDurationCurrent = this.stats.skillDuration;
+
+    // 当前攻击参数（可被不同攻击模式覆盖）
+    this.attackDamageCurrent = this.stats.attackDamage;
+    this.attackWidthCurrent = this.stats.attackWidth;
+    this.attackKnockbackCurrent = this.stats.attackKnockback;
+    this.attackDurationCurrent = this.stats.attackDuration;
+    this.attackCooldownCurrent = this.stats.attackCooldown;
+
+    // 控制键
+    this.keys = options.keys;
+
+    // AI 攻击频率控制（仅 AI 使用）
+    this.aiAttackDelay = 0;
+  }
+
+  applyStats(newStats) {
+    this.stats = { ...this.stats, ...newStats };
+    this.maxHp = this.stats.maxHp;
+    this.hp = Math.min(this.hp, this.maxHp);
+    this.speed = this.stats.moveSpeed;
+    this.jumpPower = this.stats.jumpPower;
+    this.attackDuration = this.stats.attackDuration;
+    this.attackCooldown = this.stats.attackCooldown;
+    this.attackDamageCurrent = this.stats.attackDamage;
+    this.attackWidthCurrent = this.stats.attackWidth;
+    this.attackKnockbackCurrent = this.stats.attackKnockback;
+    this.attackDurationCurrent = this.stats.attackDuration;
+    this.attackCooldownCurrent = this.stats.attackCooldown;
+    this.skillDamageCurrent = this.stats.skillDamage;
+    this.skillWidthCurrent = this.stats.skillWidth;
+    this.skillKnockbackCurrent = this.stats.skillKnockback;
+    this.skillDurationCurrent = this.stats.skillDuration;
+  }
+
+  getHitbox() {
+    return {
+      x: this.x,
+      y: this.y,
+      width: this.width,
+      height: this.height
+    };
+  }
+
+  getAttackBox() {
+    const atkWidth = this.attackWidthCurrent;
+    return {
+      x: this.facing === 1 ? this.x + this.width : this.x - atkWidth,
+      y: this.y + 10,
+      width: atkWidth,
+      height: this.height - 20
+    };
+  }
+
+  takeHit(damage, fromDirection) {
+    this.hp -= damage;
+    this.hitstunTimer = this.stats.attackHitstun;
+    this.flashTimer = this.stats.attackFlash;
+    this.isAttacking = false;
+    // 取消击退，仅受硬直影响
+    this.velX = 0;
+  }
+
+  startAttack(profile = null) {
+    if (this.isAttacking || this.cooldownTimer > 0) return false;
+    // 应用攻击模式覆盖
+    if (profile) {
+      this.attackDamageCurrent = profile.damage ?? this.stats.attackDamage;
+      this.attackWidthCurrent = profile.width ?? this.stats.attackWidth;
+      this.attackKnockbackCurrent = profile.knockback ?? this.stats.attackKnockback;
+      this.attackDurationCurrent = profile.duration ?? this.stats.attackDuration;
+      this.attackCooldownCurrent = profile.cooldown ?? this.stats.attackCooldown;
+      if (profile.dashSpeed) {
+        this.velX = this.facing * profile.dashSpeed;
+      }
+    } else {
+      this.attackDamageCurrent = this.stats.attackDamage;
+      this.attackWidthCurrent = this.stats.attackWidth;
+      this.attackKnockbackCurrent = this.stats.attackKnockback;
+      this.attackDurationCurrent = this.stats.attackDuration;
+      this.attackCooldownCurrent = this.stats.attackCooldown;
+    }
+    this.isAttacking = true;
+    this.attackTimer = this.attackDurationCurrent;
+    this.cooldownTimer = this.attackCooldownCurrent;
+    return true;
+  }
+
+  startSkill() {
+    if (this.isUsingSkill || this.skillCooldownTimer > 0 || this.hitstunTimer > 0) return false;
+    this.isUsingSkill = true;
+    this.skillTimer = this.skillDurationCurrent;
+    this.skillCooldownTimer = this.stats.skillCooldown;
+    this.attackDamageCurrent = this.skillDamageCurrent;
+    this.attackWidthCurrent = this.skillWidthCurrent;
+    this.attackKnockbackCurrent = this.skillKnockbackCurrent;
+    return true;
+  }
+
+  update(input, justPressed, dt) {
+    const frictionPow = Math.pow(CONFIG.friction, dt);
+
+    // 受击硬直
+    if (this.hitstunTimer > 0) {
+      this.hitstunTimer -= dt;
+      this.velX *= frictionPow;
+    } else {
+    // 水平移动
+    if (input[this.keys.left]) {
+        this.velX = -this.speed * dt;
+      this.facing = -1;
+    } else if (input[this.keys.right]) {
+        this.velX = this.speed * dt;
+      this.facing = 1;
+    } else {
+        this.velX *= frictionPow;
+    }
+
+    // 跳跃
+      if (justPressed[this.keys.jump] && this.onGround) {
+        this.velY = -this.jumpPower * dt;
+        this.onGround = false;
+      }
+
+      // 攻击（只响应按下瞬间，避免长按连发）
+      if (
+        justPressed[this.keys.attack] &&
+        !this.isAttacking &&
+        this.cooldownTimer <= 0
+      ) {
+        this.startAttack();
+      }
+
+      // 技能触发
+      if (justPressed[this.keys.skill]) {
+        this.startSkill();
+      }
+    }
+
+    if (this.isAttacking) {
+      this.attackTimer -= dt;
+      if (this.attackTimer <= 0) {
+        this.isAttacking = false;
+      }
+    }
+    if (this.cooldownTimer > 0) {
+      this.cooldownTimer -= dt;
+    }
+    if (this.isUsingSkill) {
+      this.skillTimer -= dt;
+      if (this.skillTimer <= 0) {
+        this.isUsingSkill = false;
+      }
+    }
+    if (this.skillCooldownTimer > 0) {
+      this.skillCooldownTimer -= dt;
+    }
+    if (this.flashTimer > 0) {
+      this.flashTimer -= dt;
+    }
+
+    // 重力 & 位置更新
+    this.velY += CONFIG.gravity * dt;
+
+    this.x += this.velX;
+    this.y += this.velY;
+
+    // 碰地
+    if (this.y + this.height >= CONFIG.groundY) {
+      this.y = CONFIG.groundY - this.height;
+      this.velY = 0;
+      this.onGround = true;
+    } else {
+      this.onGround = false;
+    }
+
+    // 边界
+    if (this.x < 0) this.x = 0;
+    if (this.x + this.width > WIDTH) this.x = WIDTH - this.width;
+
+    // 状态机（简单版）
+    if (this.hitstunTimer > 0) {
+      this.state = "hit";
+    } else if (this.isAttacking) {
+      this.state = "attack";
+    } else if (!this.onGround) {
+      this.state = "jump";
+    } else if (Math.abs(this.velX) > 0.1) {
+      this.state = "run";
+    } else {
+      this.state = "idle";
+    }
+  }
+
+  // AI：根据距离选择不同攻击模式
+  updateAI(target, dt) {
+    const frictionPow = Math.pow(CONFIG.friction, dt);
+    if (this.aiAttackDelay > 0) this.aiAttackDelay -= dt;
+
+    if (this.hitstunTimer > 0) {
+      this.hitstunTimer -= dt;
+      this.velX *= frictionPow;
+    } else {
+      const center = this.x + this.width / 2;
+      const targetCenter = target.x + target.width / 2;
+      const dir = Math.sign(targetCenter - center) || 1;
+      this.facing = dir;
+
+      const distance = Math.abs(targetCenter - center);
+      const shortRange = this.stats.attackWidth + 10;
+      const midRange = shortRange + 70;
+      const preferRange = shortRange + 20; // 期望保持的中等距离
+
+      // 移动策略：过远靠近，过近后退，适中减速
+      if (distance > preferRange) {
+        this.velX = dir * this.speed * dt;
+      } else if (distance < shortRange * 0.75) {
+        this.velX = -dir * this.speed * 0.7 * dt; // 贴太近则后撤
+      } else {
+        this.velX *= frictionPow;
+      }
+
+      // 攻击决策
+      if (this.cooldownTimer <= 0 && this.aiAttackDelay <= 0) {
+        if (distance < shortRange) {
+          // 近距离优先快速或重击，加入随机性
+          const roll = Math.random();
+          if (roll < 0.35) {
+            this.startAttack(AI_ATTACKS.heavy);
+          } else {
+            this.startAttack(AI_ATTACKS.quick);
+          }
+          this.aiAttackDelay = 24 + Math.random() * 12; // 放完招稍作停顿
+        } else if (distance < midRange) {
+          // 中距离尝试突进攻击
+          this.startAttack(AI_ATTACKS.lunge);
+          this.aiAttackDelay = 24 + Math.random() * 12;
+        }
+      } else if (this.skillCooldownTimer <= 0 && distance < midRange) {
+        // 偶尔释放技能（更高伤害范围）
+        if (Math.random() < 0.25) {
+          this.startSkill();
+          this.aiAttackDelay = 32 + Math.random() * 16;
+        }
+      }
+    }
+
+    if (this.isAttacking) {
+      this.attackTimer -= dt;
+      if (this.attackTimer <= 0) {
+        this.isAttacking = false;
+      }
+    }
+    if (this.cooldownTimer > 0) {
+      this.cooldownTimer -= dt;
+    }
+    if (this.isUsingSkill) {
+      this.skillTimer -= dt;
+      if (this.skillTimer <= 0) {
+        this.isUsingSkill = false;
+      }
+    }
+    if (this.skillCooldownTimer > 0) {
+      this.skillCooldownTimer -= dt;
+    }
+    if (this.flashTimer > 0) {
+      this.flashTimer -= dt;
+    }
+
+    // 重力 & 位置更新
+    this.velY += CONFIG.gravity * dt;
+
+    this.x += this.velX;
+    this.y += this.velY;
+
+    // 碰地
+    if (this.y + this.height >= CONFIG.groundY) {
+      this.y = CONFIG.groundY - this.height;
+      this.velY = 0;
+      this.onGround = true;
+    } else {
+      this.onGround = false;
+    }
+
+    // 边界
+    if (this.x < 0) this.x = 0;
+    if (this.x + this.width > WIDTH) this.x = WIDTH - this.width;
+
+    if (this.hitstunTimer > 0) {
+      this.state = "hit";
+    } else if (this.isAttacking) {
+      this.state = "attack";
+    } else if (!this.onGround) {
+      this.state = "jump";
+    } else if (Math.abs(this.velX) > 0.1) {
+      this.state = "run";
+    } else {
+      this.state = "idle";
+    }
+  }
+
+  draw() {
+    // 身体
+    ctx.save();
+    ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+    ctx.scale(this.facing, 1);
+    ctx.translate(-this.width / 2, -this.height / 2);
+
+    if (this.flashTimer > 0) {
+      ctx.globalAlpha = 0.5 + 0.5 * Math.sin(this.flashTimer * 0.5);
+    }
+
+    const swing =
+      this.isAttacking
+        ? Math.sin(
+            Math.max(
+              0,
+              Math.min(1, 1 - this.attackTimer / this.attackDurationCurrent)
+            ) * Math.PI
+          )
+        : this.isUsingSkill
+        ? Math.sin(
+            Math.max(
+              0,
+              Math.min(1, 1 - this.skillTimer / this.skillDurationCurrent)
+            ) * Math.PI
+          )
+        : 0;
+
+    // 身体
+    ctx.fillStyle = this.colorBody;
+    ctx.fillRect(0, 20, this.width, this.height - 20);
+
+    // 头
+    ctx.fillStyle = this.colorBody;
+    ctx.fillRect(10, 0, this.width - 20, 30);
+
+    // 耳朵
+    ctx.beginPath();
+    ctx.moveTo(12, 0);
+    ctx.lineTo(20, -10);
+    ctx.lineTo(28, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(this.width - 12, 0);
+    ctx.lineTo(this.width - 20, -10);
+    ctx.lineTo(this.width - 28, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    // 花纹（简单块）
+    ctx.fillStyle = this.colorAccent;
+    ctx.fillRect(5, 35, 20, 25);
+    ctx.fillRect(30, 55, 22, 25);
+
+    // 脸白色区域
+    ctx.fillStyle = "#fdfdfd";
+    ctx.fillRect(15, 10, this.width - 30, 20);
+
+    // 眼睛
+    ctx.fillStyle = "#333";
+    ctx.fillRect(20, 14, 6, 6);
+    ctx.fillRect(this.width - 26, 14, 6, 6);
+
+    // 前爪（攻击时前伸）
+    const pawForward = swing * 12;
+    ctx.fillStyle = this.colorBody;
+    ctx.fillRect(this.width - 18, 45, 12 + pawForward, 10);
+
+    // 尾巴
+    ctx.fillStyle = this.colorBody;
+    ctx.fillRect(-15, 45, 15, 10);
+
+    // 攻击特效（在局部坐标，已处理朝向缩放）
+    this.drawSlashEffect(swing);
+
+    // 技能特效：更宽的弧线+发光
+    if (this.isUsingSkill) {
+      this.drawSkillEffect(swing);
+    }
+
+    ctx.restore();
+
+    // 攻击范围可选显示（调试）：
+    // if (this.isAttacking) {
+    //   const box = this.getAttackBox();
+    //   ctx.strokeStyle = "rgba(255,0,0,0.5)";
+    //   ctx.strokeRect(box.x, box.y, box.width, box.height);
+    // }
+  }
+
+  drawSlashEffect(swing) {
+    if (!this.isAttacking) return;
+
+    const len = 80 + 20 * swing;
+    const thick = 8 + 6 * swing;
+
+    ctx.save();
+    ctx.translate(this.width, this.height / 2 - 6);
+    ctx.rotate(-0.35 + 0.9 * swing);
+
+    const grad = ctx.createLinearGradient(0, 0, len, 0);
+    grad.addColorStop(0, "rgba(255,255,255,0)");
+    grad.addColorStop(0.25, CONFIG.attack.slashColor);
+    grad.addColorStop(1, "rgba(255,180,140,0)");
+
+    ctx.fillStyle = grad;
+    ctx.shadowColor = CONFIG.attack.slashGlow;
+    ctx.shadowBlur = 14;
+
+    ctx.beginPath();
+    ctx.moveTo(0, -thick);
+    ctx.lineTo(len, -thick * 0.25);
+    ctx.lineTo(len, thick * 0.25);
+    ctx.lineTo(0, thick);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  drawSkillEffect(swing) {
+    const len = 130 + 50 * swing;
+    const thick = 18 + 12 * swing;
+    ctx.save();
+    ctx.translate(this.width, this.height / 2 - 2);
+    ctx.rotate(-0.55 + 1.15 * swing);
+    ctx.globalCompositeOperation = "lighter"; // 提升炫光感
+
+    // 主弧光
+    const grad = ctx.createLinearGradient(0, 0, len, 0);
+    grad.addColorStop(0, "rgba(80,160,255,0)");
+    grad.addColorStop(0.28, "rgba(120,210,255,0.95)");
+    grad.addColorStop(0.7, "rgba(80,180,255,0.6)");
+    grad.addColorStop(1, "rgba(80,160,255,0)");
+
+    ctx.fillStyle = grad;
+    ctx.shadowColor = "rgba(140,220,255,0.9)";
+    ctx.shadowBlur = 26;
+
+    ctx.beginPath();
+    ctx.moveTo(0, -thick);
+    ctx.lineTo(len, -thick * 0.15);
+    ctx.lineTo(len, thick * 0.15);
+    ctx.lineTo(0, thick);
+    ctx.closePath();
+    ctx.fill();
+
+    // 外层蓝白光晕
+    ctx.shadowColor = "rgba(255,255,255,0.85)";
+    ctx.shadowBlur = 35;
+    ctx.strokeStyle = "rgba(170,230,255,0.8)";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(len * 0.9, 0);
+    ctx.stroke();
+
+    // 残影次弧
+    ctx.shadowBlur = 14;
+    ctx.strokeStyle = "rgba(120,210,255,0.55)";
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.moveTo(-8, -thick * 0.5);
+    ctx.lineTo(len * 0.8, -thick * 0.1);
+    ctx.stroke();
+
+    // 末端闪点
+    ctx.shadowBlur = 30;
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.beginPath();
+    ctx.arc(len, 0, 10 + 8 * swing, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+// ====== 创建角色（参考图片配色） ======
+let keysPressed = {};
+let keysJustPressed = {};
+
+const player1 = new Fighter({
+  x: 200,
+  y: 100,
+  colorBody: "#d9d9dd",      // 灰白
+  colorAccent: "#ffffff",
+  facing: 1,
+  // 可调属性：每只猫可单独配置
+  stats: {
+    maxHp: 150,
+    moveSpeed: 5.2,
+    jumpPower: 20,
+    attackDamage: 8,
+    attackCooldown: 22,
+    attackKnockback: 8,
+    skillDamage: 25
+  },
+  keys: {
+    left: "ArrowLeft",
+    right: "ArrowRight",
+    jump: "ArrowUp",
+    attack: "Space",
+    skill: "KeyZ"
+  }
+});
+
+const player2 = new Fighter({
+  x: 700,
+  y: 100,
+  colorBody: "#f5c197",      // 橘色
+  colorAccent: "#ffffff",
+  facing: -1,
+  stats: {
+    maxHp: 120,
+    moveSpeed: 4.2,
+    jumpPower: 18,
+    attackDamage: 5,
+    attackCooldown: 25,
+    attackKnockback: 7,
+    // AI 技能可独立调节
+    skillDamage: 12,
+    skillWidth: 110,
+    skillCooldown: 200,
+    skillKnockback: 13
+  },
+  keys: {} // AI 控制，不使用键盘
+});
+
+let gameOver = false;
+let winnerText = "";
+let currentLevel = 0;
+
+// ====== 输入监听 ======
+window.addEventListener("keydown", e => {
+  if (e.repeat) return; // 防止长按重复触发
+  if (e.code === "KeyR" && gameOver) {
+    resetGame();
+  }
+  keysPressed[e.code] = true;
+  keysJustPressed[e.code] = true;
+});
+
+window.addEventListener("keyup", e => {
+  keysPressed[e.code] = false;
+});
+
+// ====== 工具函数 ======
+function rectIntersect(a, b) {
+  return !(
+    a.x + a.width < b.x ||
+    a.x > b.x + b.width ||
+    a.y + a.height < b.y ||
+    a.y > b.y + b.height
+  );
+}
+
+// 简单角色碰撞（水平分离）
+function resolveCollision(f1, f2) {
+  const a = f1.getHitbox();
+  const b = f2.getHitbox();
+  if (!rectIntersect(a, b)) return;
+
+  const overlapLeft = b.x + b.width - a.x;
+  const overlapRight = a.x + a.width - b.x;
+  const push = overlapLeft < overlapRight ? overlapLeft : -overlapRight;
+
+  // 平分推开
+  f1.x += push / 2;
+  f2.x -= push / 2;
+
+  // 避免无限抖动，限制在场内
+  if (f1.x < 0) f1.x = 0;
+  if (f1.x + f1.width > WIDTH) f1.x = WIDTH - f1.width;
+  if (f2.x < 0) f2.x = 0;
+  if (f2.x + f2.width > WIDTH) f2.x = WIDTH - f2.width;
+
+  // 水平速度衰减，减少穿透
+  f1.velX *= 0.2;
+  f2.velX *= 0.2;
+}
+
+// ====== 绘制背景（参考照片场景） ======
+// 背景缓存：只画一次，循环中直接贴图
+const bgCanvas = document.createElement("canvas");
+bgCanvas.width = WIDTH;
+bgCanvas.height = HEIGHT;
+const bgCtx = bgCanvas.getContext("2d");
+
+function drawBackgroundToBuffer() {
+  // 天空 / 建筑墙面
+  bgCtx.fillStyle = "#b0b5b8";
+  bgCtx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  // 远处建筑玻璃
+  bgCtx.fillStyle = "#777c80";
+  bgCtx.fillRect(0, 60, WIDTH, 200);
+
+  bgCtx.fillStyle = "#303336";
+  for (let i = 0; i < 6; i++) {
+    bgCtx.fillRect(40 + i * 150, 70, 110, 170);
+  }
+
+  // 灰色道路
+  bgCtx.fillStyle = "#7d7f82";
+  bgCtx.fillRect(0, 230, WIDTH, HEIGHT - 230);
+
+  // 左侧种植池
+  bgCtx.fillStyle = "#c79c6a";
+  bgCtx.fillRect(30, 230, 260, 40);
+  bgCtx.fillRect(330, 230, 260, 40);
+  bgCtx.fillRect(640, 230, 290, 40);
+
+  // 绿化
+  bgCtx.fillStyle = "#2f6b3a";
+  bgCtx.fillRect(30, 200, 260, 40);
+  bgCtx.fillRect(330, 200, 260, 40);
+  bgCtx.fillRect(640, 200, 290, 40);
+
+  // 右侧弯曲花坛（简单矩形代替）
+  bgCtx.fillStyle = "#c79c6a";
+  bgCtx.fillRect(580, 260, 320, 50);
+  bgCtx.fillStyle = "#265930";
+  bgCtx.fillRect(580, 220, 320, 40);
+
+  // 地面线条
+  bgCtx.strokeStyle = "#707274";
+  bgCtx.lineWidth = 2;
+  for (let i = 0; i < 8; i++) {
+    bgCtx.beginPath();
+    bgCtx.moveTo(0, 280 + i * 30);
+    bgCtx.lineTo(WIDTH, 260 + i * 30);
+    bgCtx.stroke();
+  }
+
+  // 灯杆
+  bgCtx.fillStyle = "#ffffff";
+  bgCtx.fillRect(220, 80, 20, 160);
+}
+
+function drawBackground() {
+  ctx.drawImage(bgCanvas, 0, 0);
+}
+
+// ====== 血条和 UI ======
+function drawUI() {
+  const barWidth = 300;
+  const barHeight = 20;
+
+  // 玩家1 HP
+  ctx.fillStyle = "#000";
+  ctx.fillRect(40, 20, barWidth, barHeight);
+  ctx.fillStyle = "#4caf50";
+  ctx.fillRect(40, 20, (player1.hp / player1.maxHp) * barWidth, barHeight);
+  ctx.fillStyle = "#fff";
+  ctx.font = "14px system-ui";
+  ctx.fillText("灰白猫", 40, 18);
+
+  // 玩家2 HP
+  ctx.fillStyle = "#000";
+  ctx.fillRect(WIDTH - 40 - barWidth, 20, barWidth, barHeight);
+  ctx.fillStyle = "#f44336";
+  ctx.fillRect(
+    WIDTH - 40 - barWidth,
+    20,
+    (player2.hp / player2.maxHp) * barWidth,
+    barHeight
+  );
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "right";
+  ctx.fillText("橘白猫", WIDTH - 40, 18);
+  ctx.textAlign = "left";
+
+  // 提示
+  ctx.fillStyle = "#fff";
+  ctx.font = "14px system-ui";
+  ctx.fillText("P1: ←/→ 移动, ↑ 跳跃, 空格 攻击", 40, HEIGHT - 40);
+  ctx.fillText("技能: Z 键释放（冷却）", 40, HEIGHT - 20);
+
+  // 关卡信息
+  ctx.textAlign = "center";
+  ctx.fillText(`关卡 ${currentLevel + 1}/${LEVELS.length}`, WIDTH / 2, 18);
+  ctx.textAlign = "left";
+
+  // 技能冷却显示
+  const skillBarWidth = 180;
+  const skillBarHeight = 12;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(WIDTH - 40 - skillBarWidth, HEIGHT - 32, skillBarWidth, skillBarHeight);
+  const cdRatio = Math.max(
+    0,
+    1 - Math.max(player1.skillCooldownTimer, 0) / player1.stats.skillCooldown
+  );
+  ctx.fillStyle = "#80d8ff";
+  ctx.fillRect(
+    WIDTH - 40 - skillBarWidth,
+    HEIGHT - 32,
+    cdRatio * skillBarWidth,
+    skillBarHeight
+  );
+  ctx.fillStyle = "#fff";
+  ctx.font = "12px system-ui";
+  ctx.textAlign = "right";
+  ctx.fillText("技能冷却", WIDTH - 44, HEIGHT - 22);
+  ctx.textAlign = "left";
+
+  if (gameOver) {
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.font = "40px system-ui";
+    ctx.fillText(winnerText, WIDTH / 2, HEIGHT / 2 - 20);
+
+    ctx.font = "20px system-ui";
+    ctx.fillText("按 R 键重新开始", WIDTH / 2, HEIGHT / 2 + 20);
+    ctx.textAlign = "left";
+  }
+}
+
+// ====== 游戏循环 ======
+function gameStep(dt) {
+  if (!gameOver) {
+    player1.update(keysPressed, keysJustPressed, dt);
+    player2.updateAI(player1, dt);
+
+    // 角色碰撞分离
+    resolveCollision(player1, player2);
+
+  // 互相攻击判定
+  if (player1.isAttacking) {
+    const box = player1.getAttackBox();
+    if (rectIntersect(box, player2.getHitbox())) {
+        player2.takeHit(player1.attackDamageCurrent, 1);
+      player1.isAttacking = false; // 命中就收招
+    }
+  }
+    if (player1.isUsingSkill) {
+      const box = player1.getAttackBox();
+      if (rectIntersect(box, player2.getHitbox())) {
+        player2.takeHit(player1.skillDamageCurrent, 1);
+        player1.isUsingSkill = false;
+      }
+    }
+  if (player2.isAttacking) {
+    const box = player2.getAttackBox();
+    if (rectIntersect(box, player1.getHitbox())) {
+        player1.takeHit(player2.attackDamageCurrent, -1);
+      player2.isAttacking = false;
+    }
+  }
+    if (player2.isUsingSkill) {
+      const box = player2.getAttackBox();
+      if (rectIntersect(box, player1.getHitbox())) {
+        player1.takeHit(player2.skillDamageCurrent, -1);
+        player2.isUsingSkill = false;
+      }
+    }
+
+  // 判断胜负
+    if (player1.hp <= 0) {
+    gameOver = true;
+      winnerText = "闯关失败，按 R 重试本关";
+    } else if (player2.hp <= 0) {
+      // 进入下一关或通关
+      if (currentLevel < LEVELS.length - 1) {
+        currentLevel++;
+        startLevel(currentLevel);
+    } else {
+        gameOver = true;
+        winnerText = "通关！你打赢了所有关卡";
+      }
+    }
+  }
+
+  // 绘制
+  drawBackground();
+  player1.draw();
+  player2.draw();
+  drawUI();
+
+  // 消费本帧的按下事件
+  keysJustPressed = {};
+}
+
+function resetGame() {
+  player1.x = 200;
+  player1.y = 100;
+  player1.hp = player1.maxHp;
+  player1.velX = player1.velY = 0;
+  player1.hitstunTimer = 0;
+  player1.flashTimer = 0;
+
+  player2.x = 700;
+  player2.y = 100;
+  player2.hp = player2.maxHp;
+  player2.velX = player2.velY = 0;
+  player2.hitstunTimer = 0;
+  player2.flashTimer = 0;
+
+  gameOver = false;
+  winnerText = "";
+}
+
+function startLevel(levelIndex) {
+  currentLevel = levelIndex;
+  player2.applyStats(LEVELS[levelIndex].stats);
+  resetGame();
+}
+
+// 启动游戏
+drawBackgroundToBuffer();
+let lastTime = performance.now();
+startLevel(0);
+function loop(timestamp) {
+  const delta = Math.min(50, timestamp - lastTime); // 防止切后台造成过大步长
+  lastTime = timestamp;
+  const dt = delta / (1000 / 60); // 以 60fps 为基准的归一化 dt
+  gameStep(dt);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
